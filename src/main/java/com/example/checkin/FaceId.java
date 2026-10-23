@@ -1,7 +1,5 @@
 package com.example.checkin;
 
-import jakarta.annotation.PreDestroy;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -13,8 +11,7 @@ import java.util.concurrent.Semaphore;
 
 /**
  * Face ID как Spring-сервис: регистрация лица и поиск человека по фото.
- * Использует бин {@link FaceEngine}, если он есть в контексте, иначе создаёт свой
- * по настройкам MODELS_DIR и FACE_MOCK.
+ * Использует бины {@link FaceEngine} и {@link FaceMath}.
  *
  * Пример в контроллере:
  * <pre>
@@ -35,8 +32,7 @@ public class FaceId {
     }
 
     private final FaceEngine engine;
-    /** true, если движок создан этим сервисом и его надо закрыть при остановке. */
-    private final boolean ownsEngine;
+    private final FaceMath math;
     private final float threshold;
     private final float margin;
     /** Ограничение одновременных запусков модели, чтобы не перегрузить CPU и память. */
@@ -44,23 +40,16 @@ public class FaceId {
     /** Группа (мероприятие) -> (id человека -> нормированный вектор). */
     private final Map<Object, Map<String, float[]>> groups = new ConcurrentHashMap<>();
 
-    public FaceId(ObjectProvider<FaceEngine> engines,
-                  @Value("${MODELS_DIR:models}") String modelsDir,
-                  @Value("${FACE_MOCK:0}") String mock,
+    public FaceId(FaceEngine engine,
+                  FaceMath math,
                   @Value("${FACE_THRESHOLD:0.40}") float threshold,
                   @Value("${FACE_MARGIN:0.05}") float margin,
-                  @Value("${FACE_MAX_PARALLEL:2}") int maxParallel) throws Exception {
-        FaceEngine existing = engines.getIfAvailable();
-        this.ownsEngine = existing == null;
-        this.engine = existing != null ? existing : new FaceEngine(modelsDir, "1".equals(mock));
+                  @Value("${FACE_MAX_PARALLEL:2}") int maxParallel) {
+        this.engine = engine;
+        this.math = math;
         this.threshold = threshold;
         this.margin = margin;
         this.slots = new Semaphore(Math.max(1, maxParallel));
-    }
-
-    @PreDestroy
-    void close() throws Exception {
-        if (ownsEngine) engine.close();
     }
 
     // ---------- регистрация ----------
@@ -77,13 +66,13 @@ public class FaceId {
     /** Добавляет или обновляет человека в группе поиска. */
     public void put(Object groupId, String personId, byte[] embedding) {
         groups.computeIfAbsent(groupId, k -> new ConcurrentHashMap<>())
-                .put(personId, FaceMath.l2normalize(toFloats(embedding)));
+                .put(personId, math.l2normalize(toFloats(embedding)));
     }
 
     /** Полностью заменяет группу, например при старте приложения из БД. */
     public void load(Object groupId, Map<String, byte[]> embeddings) {
         Map<String, float[]> m = new ConcurrentHashMap<>();
-        embeddings.forEach((id, e) -> m.put(id, FaceMath.l2normalize(toFloats(e))));
+        embeddings.forEach((id, e) -> m.put(id, math.l2normalize(toFloats(e))));
         groups.put(groupId, m);
     }
 
@@ -111,7 +100,7 @@ public class FaceId {
         String bestId = null;
         float bestScore = -2, second = -2;
         for (Map.Entry<String, float[]> p : people.entrySet()) {
-            float s = FaceMath.dot(p.getValue(), probe);
+            float s = math.dot(p.getValue(), probe);
             if (s > bestScore) { second = bestScore; bestScore = s; bestId = p.getKey(); }
             else if (s > second) second = s;
         }
@@ -125,7 +114,7 @@ public class FaceId {
     /** Проверка «это тот же человек?» (1:1). */
     public boolean verify(byte[] image, byte[] storedEmbedding) {
         float[] probe = embed(image, false);
-        return FaceMath.dot(probe, FaceMath.l2normalize(toFloats(storedEmbedding))) >= threshold;
+        return math.dot(probe, math.l2normalize(toFloats(storedEmbedding))) >= threshold;
     }
 
     private float[] embed(byte[] image, boolean requireSingle) {

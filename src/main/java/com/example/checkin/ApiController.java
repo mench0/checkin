@@ -50,6 +50,7 @@ public class ApiController {
 
     private final JdbcTemplate db;
     private final FaceEngine faces;
+    private final FaceMath math;
     private final SecureRandom random = new SecureRandom();
     private final Map<String, Deque<Long>> hits = new ConcurrentHashMap<>();
 
@@ -58,9 +59,10 @@ public class ApiController {
     @Value("${FACE_THRESHOLD:0.40}") private float threshold;
     @Value("${FACE_MARGIN:0.05}") private float margin;
 
-    public ApiController(JdbcTemplate db, FaceEngine faces) {
+    public ApiController(JdbcTemplate db, FaceEngine faces, FaceMath math) {
         this.db = db;
         this.faces = faces;
+        this.math = math;
     }
 
     @PostConstruct
@@ -322,7 +324,7 @@ public class ApiController {
         int best = -1;
         float bestScore = -2, second = -2;
         for (int i = 0; i < rows.size(); i++) {
-            float s = FaceMath.dot(FaceMath.l2normalize(toFloats((byte[]) rows.get(i).get("embedding"))), probe);
+            float s = math.dot(math.l2normalize(toFloats((byte[]) rows.get(i).get("embedding"))), probe);
             if (s > bestScore) { second = bestScore; bestScore = s; best = i; }
             else if (s > second) second = s;
         }

@@ -1,13 +1,14 @@
 package com.example.checkin;
 
+import org.springframework.stereotype.Component;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
 /** Чистая математика без внешних библиотек: выравнивание лица, NMS, сравнение векторов. */
-public final class FaceMath {
-
-    private FaceMath() {}
+@Component
+public class FaceMath {
 
     /** Эталонные точки ArcFace для кропа 112x112: глаза, нос, уголки рта. */
     public static final float[] ARCFACE_DST = {
@@ -22,7 +23,7 @@ public final class FaceMath {
      * Подобие (масштаб + поворот + сдвиг), переводящее src в dst по МНК.
      * Возвращает {a, b, tx, ty}: x' = a*x - b*y + tx, y' = b*x + a*y + ty.
      */
-    public static double[] estimateSimilarity(float[] src, float[] dst) {
+    public double[] estimateSimilarity(float[] src, float[] dst) {
         int n = src.length / 2;
         double mx = 0, my = 0, dmx = 0, dmy = 0;
         for (int i = 0; i < n; i++) {
@@ -49,7 +50,7 @@ public final class FaceMath {
      * Вырезает выровненное лицо size x size из ARGB-пикселей (ширина w, высота h).
      * Возвращает тензор NCHW (RGB), нормализованный как (v - 127.5) / 127.5.
      */
-    public static float[] warpToTensor(int[] argb, int w, int h, double[] m, int size) {
+    public float[] warpToTensor(int[] argb, int w, int h, double[] m, int size) {
         double a = m[0], b = m[1], tx = m[2], ty = m[3];
         double det = a * a + b * b;
         int plane = size * size;
@@ -69,7 +70,7 @@ public final class FaceMath {
         return out;
     }
 
-    private static float[] bilinear(int[] argb, int w, int h, double x, double y) {
+    private float[] bilinear(int[] argb, int w, int h, double x, double y) {
         int x0 = (int) Math.floor(x), y0 = (int) Math.floor(y);
         double fx = x - x0, fy = y - y0;
         float[] res = new float[3];
@@ -94,7 +95,7 @@ public final class FaceMath {
         }
     }
 
-    public static float iou(Face p, Face q) {
+    public float iou(Face p, Face q) {
         float ix = Math.max(0, Math.min(p.x2(), q.x2()) - Math.max(p.x1(), q.x1()));
         float iy = Math.max(0, Math.min(p.y2(), q.y2()) - Math.max(p.y1(), q.y1()));
         float inter = ix * iy;
@@ -102,7 +103,7 @@ public final class FaceMath {
         return union <= 0 ? 0 : inter / union;
     }
 
-    public static List<Face> nms(List<Face> faces, float thresh) {
+    public List<Face> nms(List<Face> faces, float thresh) {
         List<Face> sorted = new ArrayList<>(faces);
         sorted.sort(Comparator.comparingDouble(Face::score).reversed());
         List<Face> keep = new ArrayList<>();
@@ -116,7 +117,7 @@ public final class FaceMath {
         return keep;
     }
 
-    public static float[] l2normalize(float[] v) {
+    public float[] l2normalize(float[] v) {
         double s = 0;
         for (float x : v) s += x * x;
         double n = Math.sqrt(s);
@@ -125,7 +126,7 @@ public final class FaceMath {
         return r;
     }
 
-    public static float dot(float[] a, float[] b) {
+    public float dot(float[] a, float[] b) {
         double s = 0;
         for (int i = 0; i < a.length; i++) s += a[i] * b[i];
         return (float) s;

@@ -4,6 +4,9 @@ import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtException;
 import ai.onnxruntime.OrtSession;
+import jakarta.annotation.PreDestroy;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
 
 import javax.imageio.ImageIO;
 import java.awt.Graphics2D;
@@ -26,6 +29,7 @@ import java.util.Random;
  * det_10g.onnx (детектор SCRFD) + w600k_r50.onnx (ArcFace, вектор 512).
  * FACE_MOCK=1 включает заглушку без моделей (только для проверки потока).
  */
+@Component
 public class FaceEngine implements AutoCloseable {
 
     public static class FaceException extends RuntimeException {
@@ -38,6 +42,7 @@ public class FaceEngine implements AutoCloseable {
     private static final float DET_THRESH = 0.5f;
     private static final float NMS_THRESH = 0.4f;
 
+    private final FaceMath math;
     private final boolean mock;
     private OrtEnvironment env;
     private OrtSession det;
@@ -45,8 +50,11 @@ public class FaceEngine implements AutoCloseable {
     private String detInput;
     private String recInput;
 
-    public FaceEngine(String modelsDir, boolean mock) throws OrtException {
-        this.mock = mock;
+    public FaceEngine(FaceMath math,
+                      @Value("${MODELS_DIR:models}") String modelsDir,
+                      @Value("${FACE_MOCK:0}") String mockFlag) throws OrtException {
+        this.math = math;
+        this.mock = "1".equals(mockFlag);
         if (mock) return;
         Path detPath = Path.of(modelsDir, "det_10g.onnx");
         Path recPath = Path.of(modelsDir, "w600k_r50.onnx");
@@ -141,35 +149,36 @@ public class FaceEngine implements AutoCloseable {
                 }
             }
         }
-        return FaceMath.nms(faces, NMS_THRESH);
+        return math.nms(faces, NMS_THRESH);
     }
 
     private float[] recognize(int[] argb, int w, int h, float[] kps) throws OrtException {
-        double[] m = FaceMath.estimateSimilarity(kps, FaceMath.ARCFACE_DST);
-        float[] input = FaceMath.warpToTensor(argb, w, h, m, 112);
+        double[] m = math.estimateSimilarity(kps, FaceMath.ARCFACE_DST);
+        float[] input = math.warpToTensor(argb, w, h, m, 112);
         try (OnnxTensor t = OnnxTensor.createTensor(env, FloatBuffer.wrap(input), new long[]{1, 3, 112, 112});
              OrtSession.Result res = rec.run(Map.of(recInput, t))) {
             FloatBuffer fb = ((OnnxTensor) res.get(0)).getFloatBuffer();
             float[] v = new float[fb.remaining()];
             fb.get(v);
-            return FaceMath.l2normalize(v);
+            return math.l2normalize(v);
         }
     }
 
-    private static float[] mockEmbedding(byte[] data) {
+    private float[] mockEmbedding(byte[] data) {
         try {
             byte[] d = MessageDigest.getInstance("SHA-256").digest(data);
             long seed = ((d[0] & 0xffL) << 24) | ((d[1] & 0xffL) << 16) | ((d[2] & 0xffL) << 8) | (d[3] & 0xffL);
             Random r = new Random(seed);
             float[] v = new float[512];
             for (int i = 0; i < v.length; i++) v[i] = (float) r.nextGaussian();
-            return FaceMath.l2normalize(v);
+            return math.l2normalize(v);
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
     }
 
     @Override
+    @PreDestroy
     public void close() throws OrtException {
         if (det != null) det.close();
         if (rec != null) rec.close();
