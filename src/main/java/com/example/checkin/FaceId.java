@@ -1,0 +1,151 @@
+package com.example.checkin;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.Collection;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
+
+/**
+ * Face ID: регистрация лица и поиск человека по фото среди зарегистрированных.
+ * Работает поверх {@link FaceEngine}, не зависит от Spring и базы данных.
+ *
+ * Пример:
+ * <pre>
+ *   FaceId faceId = new FaceId(engine, 0.40f, 0.05f, 2);
+ *   byte[] emb = faceId.enroll(selfieBytes);               // сохранить в БД
+ *   faceId.put(eventId, guestId, emb);                     // загрузить в память
+ *   FaceId.Match m = faceId.identify(eventId, photoBytes); // на входе
+ *   if (m.status() == FaceId.Status.MATCH) ... m.personId()
+ * </pre>
+ */
+public class FaceId {
+
+    public enum Status { MATCH, NO_FACE, UNKNOWN, AMBIGUOUS, EMPTY }
+
+    /** Результат поиска. personId и score заполнены только при MATCH. */
+    public record Match(Status status, String personId, float score, String reason) {
+        public boolean ok() { return status == Status.MATCH; }
+    }
+
+    private final FaceEngine engine;
+    private final float threshold;
+    private final float margin;
+    /** Ограничение одновременных запусков модели, чтобы не перегрузить CPU и память. */
+    private final Semaphore slots;
+    /** Группа (мероприятие) -> (id человека -> нормированный вектор). */
+    private final Map<Object, Map<String, float[]>> groups = new ConcurrentHashMap<>();
+
+    /**
+     * @param threshold    минимальное сходство для совпадения (обычно 0.35–0.45)
+     * @param margin       минимальный отрыв лучшего совпадения от второго
+     * @param maxParallel  сколько распознаваний может идти одновременно
+     */
+    public FaceId(FaceEngine engine, float threshold, float margin, int maxParallel) {
+        this.engine = Objects.requireNonNull(engine);
+        this.threshold = threshold;
+        this.margin = margin;
+        this.slots = new Semaphore(Math.max(1, maxParallel));
+    }
+
+    // ---------- регистрация ----------
+
+    /**
+     * Строит отпечаток лица по селфи. В кадре должно быть ровно одно лицо.
+     * @return вектор в байтах (little-endian float32) — удобно хранить в BLOB
+     * @throws FaceEngine.FaceException если лицо не найдено или их несколько
+     */
+    public byte[] enroll(byte[] image) {
+        return toBytes(embed(image, true));
+    }
+
+    /** Добавляет или обновляет человека в группе поиска. */
+    public void put(Object groupId, String personId, byte[] embedding) {
+        groups.computeIfAbsent(groupId, k -> new ConcurrentHashMap<>())
+                .put(personId, FaceMath.l2normalize(toFloats(embedding)));
+    }
+
+    /** Полностью заменяет группу, например при старте приложения из БД. */
+    public void load(Object groupId, Map<String, byte[]> embeddings) {
+        Map<String, float[]> m = new ConcurrentHashMap<>();
+        embeddings.forEach((id, e) -> m.put(id, FaceMath.l2normalize(toFloats(e))));
+        groups.put(groupId, m);
+    }
+
+    public void remove(Object groupId, String personId) {
+        Map<String, float[]> m = groups.get(groupId);
+        if (m != null) m.remove(personId);
+    }
+
+    public void clear(Object groupId) {
+        groups.remove(groupId);
+    }
+
+    // ---------- распознавание ----------
+
+    /** Ищет человека по фото в группе. Если в кадре несколько лиц, берётся самое крупное. */
+    public Match identify(Object groupId, byte[] image) {
+        Map<String, float[]> people = groups.getOrDefault(groupId, Map.of());
+        if (people.isEmpty()) return new Match(Status.EMPTY, null, 0, "Нет зарегистрированных лиц");
+        float[] probe;
+        try {
+            probe = embed(image, false);
+        } catch (FaceEngine.FaceException e) {
+            return new Match(Status.NO_FACE, null, 0, e.getMessage());
+        }
+        return best(probe, people.entrySet());
+    }
+
+    /** Проверка «это тот же человек?» (1:1), например при повторном входе. */
+    public boolean verify(byte[] image, byte[] storedEmbedding) {
+        float[] probe = embed(image, false);
+        return FaceMath.dot(probe, FaceMath.l2normalize(toFloats(storedEmbedding))) >= threshold;
+    }
+
+    private Match best(float[] probe, Collection<Map.Entry<String, float[]>> people) {
+        String bestId = null;
+        float bestScore = -2, second = -2;
+        for (Map.Entry<String, float[]> p : people) {
+            float s = FaceMath.dot(p.getValue(), probe);
+            if (s > bestScore) { second = bestScore; bestScore = s; bestId = p.getKey(); }
+            else if (s > second) second = s;
+        }
+        if (bestScore < threshold)
+            return new Match(Status.UNKNOWN, null, bestScore, "Лицо не найдено среди зарегистрированных");
+        if (people.size() > 1 && bestScore - second < margin)
+            return new Match(Status.AMBIGUOUS, null, bestScore, "Не удалось однозначно определить человека");
+        return new Match(Status.MATCH, bestId, bestScore, null);
+    }
+
+    private float[] embed(byte[] image, boolean requireSingle) {
+        if (image == null || image.length == 0) throw new FaceEngine.FaceException("Пустое изображение");
+        try {
+            slots.acquire();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Прервано", e);
+        }
+        try {
+            return engine.embedding(image, requireSingle);
+        } finally {
+            slots.release();
+        }
+    }
+
+    // ---------- преобразование вектора ----------
+
+    public static byte[] toBytes(float[] v) {
+        ByteBuffer bb = ByteBuffer.allocate(v.length * 4).order(ByteOrder.LITTLE_ENDIAN);
+        for (float x : v) bb.putFloat(x);
+        return bb.array();
+    }
+
+    public static float[] toFloats(byte[] b) {
+        ByteBuffer bb = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN);
+        float[] v = new float[b.length / 4];
+        for (int i = 0; i < v.length; i++) v[i] = bb.getFloat();
+        return v;
+    }
+}
