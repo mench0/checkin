@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Регистрация гостя</title>
+<style>
+body{font-family:system-ui;max-width:420px;margin:0 auto;padding:16px}
+input,textarea,button{width:100%;padding:12px;margin:6px 0;font-size:16px;box-sizing:border-box}
+video,canvas{width:100%;border-radius:8px;background:#000}
+button{background:#2563eb;color:#fff;border:0;border-radius:8px}
+button:disabled{background:#94a3b8}
+label.c{display:flex;gap:8px;align-items:flex-start;font-size:14px}
+label.c input{width:auto;margin-top:4px}
+#msg{color:#b91c1c}#done{display:none;text-align:center;font-size:20px;color:#16a34a}
+</style></head><body>
+<h2 id="event">Регистрация</h2>
+<div id="form">
+ <input id="name" placeholder="Имя и фамилия">
+ <input id="phone" placeholder="Телефон" type="tel">
+ <input id="party" placeholder="Сколько человек" type="number" min="1" max="50" value="1">
+ <textarea id="note" placeholder="Пожелания (аллергии, детское кресло…)" rows="2"></textarea>
+ <p>Сделайте селфи: лицо целиком, хорошее освещение, без очков и маски.</p>
+ <video id="v" autoplay playsinline muted></video>
+ <button id="snap" type="button">Сделать селфи</button>
+ <canvas id="c" hidden></canvas>
+ <label class="c"><input type="checkbox" id="consent">
+  Согласен(а) на обработку биометрических данных: сохраняется числовой отпечаток лица (не фото), только для опознавания на входе, удаляется после мероприятия.</label>
+ <button id="send" disabled>Зарегистрироваться</button>
+ <p id="msg"></p>
+</div>
+<div id="done">✔ Готово!<br>Ждём вас в ресторане. На входе отсканируйте QR и пройдите Face ID, система покажет ваш столик.</div>
+<script>
+const $=id=>document.getElementById(id);let blob=null;
+const invite=new URLSearchParams(location.search).get('invite');
+function check(){$('send').disabled=!(blob&&$('consent').checked)}
+$('consent').onchange=check;
+fetch('/api/invite/'+invite).then(r=>r.ok?r.json():Promise.reject()).then(g=>{
+ $('event').textContent=g.event;$('name').value=g.name||'';$('phone').value=g.phone||'';
+ $('party').value=g.party_size||1;$('note').value=g.note||'';
+ if(g.registered)$('msg').textContent='Вы уже зарегистрированы. Можно обновить данные и фото.';
+}).catch(()=>{$('form').innerHTML='<p>Приглашение не найдено. Попросите у ресторана новую ссылку.</p>'});
+navigator.mediaDevices.getUserMedia({video:{facingMode:'user'}}).then(s=>$('v').srcObject=s)
+ .catch(()=>$('msg').textContent='Нет доступа к камере. Разрешите камеру в браузере.');
+$('snap').onclick=()=>{const v=$('v'),c=$('c');c.width=v.videoWidth;c.height=v.videoHeight;
+ c.getContext('2d').drawImage(v,0,0);c.toBlob(b=>{blob=b;c.hidden=false;check()},'image/jpeg',0.9)};
+$('send').onclick=async()=>{
+ if(!$('name').value.trim()){$('msg').textContent='Введите имя';return}
+ $('send').disabled=true;$('msg').textContent='';
+ const f=new FormData();
+ f.append('invite',invite);f.append('name',$('name').value);f.append('phone',$('phone').value);
+ f.append('party_size',$('party').value||1);f.append('note',$('note').value);
+ f.append('consent','1');f.append('selfie',blob,'selfie.jpg');
+ const r=await fetch('/api/register',{method:'POST',body:f});const j=await r.json().catch(()=>({}));
+ if(r.ok){$('form').style.display='none';$('done').style.display='block';
+  const s=$('v').srcObject;if(s)s.getTracks().forEach(t=>t.stop())}
+ else{$('msg').textContent=j.detail||'Ошибка';check()}
+};
+</script></body></html>

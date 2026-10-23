@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Админка</title>
+<style>
+body{font-family:system-ui;max-width:900px;margin:0 auto;padding:12px}
+input,textarea,select,button{padding:8px;font-size:15px;margin:3px 0}
+textarea{width:100%;box-sizing:border-box}
+table{width:100%;border-collapse:collapse;margin-top:10px}
+td,th{border-bottom:1px solid #ddd;padding:6px;text-align:left;font-size:14px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.tag{padding:2px 8px;border-radius:10px;font-size:12px}
+.t-no{background:#e5e7eb}.t-reg{background:#bfdbfe}.t-in{background:#bbf7d0}
+#err{color:#b91c1c}
+</style></head><body>
+<h2>Гости и столики</h2>
+<div class="row">
+ <input id="key" type="password" placeholder="Ключ администратора">
+ <select id="event"></select>
+ <input id="newev" placeholder="Новое мероприятие"><button id="mkev">Создать</button>
+</div>
+<p id="err"></p>
+<p id="stats">—</p>
+<div class="row">
+ <a id="qr" target="_blank">QR для входа в ресторан (распечатать)</a>
+ <button id="purge">Удалить отпечатки лиц</button>
+</div>
+<h3>Добавить гостей</h3>
+<textarea id="lines" rows="4" placeholder="По одному в строке: Имя; столик&#10;Анна Петрова; 5&#10;Иван Сидоров"></textarea>
+<button id="add">Создать приглашения</button>
+<table><thead><tr><th>Гость</th><th>Столик</th><th>Статус</th><th>Ссылка</th><th></th></tr></thead><tbody id="rows"></tbody></table>
+<script>
+const $=id=>document.getElementById(id);
+$('key').value=localStorage.getItem('akey')||'';
+$('key').onchange=()=>{localStorage.setItem('akey',$('key').value);loadEvents()};
+async function api(path,opt={}){
+ opt.headers={...(opt.headers||{}),'X-Admin-Key':$('key').value};
+ const r=await fetch(path,opt);const j=await r.json().catch(()=>({}));
+ if(!r.ok)throw new Error(j.detail||r.status);$('err').textContent='';return j;
+}
+function form(o){const f=new FormData();for(const k in o)f.append(k,o[k]);return f}
+const fail=e=>$('err').textContent=e.message;
+async function loadEvents(){
+ const es=await fetch('/api/events').then(r=>r.json());
+ const cur=$('event').value;$('event').innerHTML='';
+ es.forEach(e=>$('event').add(new Option(e.name,e.id)));if(cur)$('event').value=cur;
+ refresh();
+}
+async function refresh(){
+ const id=$('event').value;if(!id)return;
+ $('qr').href='/api/event/'+id+'/qr.png';
+ try{
+  const s=await api('/api/admin/stats/'+id);
+  $('stats').textContent='Приглашено: '+s.total+' · зарегистрировано: '+s.registered+' · пришло: '+s.arrived;
+  const gs=await api('/api/admin/guests/'+id);const tb=$('rows');tb.innerHTML='';
+  gs.forEach(g=>{
+   const tr=tb.insertRow();tr.insertCell().textContent=g.name+(g.party_size>1?' (+'+(g.party_size-1)+')':'');
+   const ti=document.createElement('input');ti.value=g.table_no||'';ti.size=6;
+   ti.onchange=()=>api('/api/admin/guests/'+g.id+'/table',{method:'POST',body:form({table_no:ti.value})}).catch(fail);
+   tr.insertCell().appendChild(ti);
+   const st=tr.insertCell();const tag=document.createElement('span');tag.className='tag '+(g.arrived_at?'t-in':g.registered_at?'t-reg':'t-no');
+   tag.textContent=g.arrived_at?'пришёл':g.registered_at?'зарегистрирован':'ждёт регистрации';st.appendChild(tag);
+   const lc=tr.insertCell();const cb=document.createElement('button');cb.textContent='Копировать';
+   cb.onclick=()=>navigator.clipboard.writeText(g.link).then(()=>cb.textContent='Скопировано');lc.appendChild(cb);
+   const dc=tr.insertCell();const db=document.createElement('button');db.textContent='✕';
+   db.onclick=()=>{if(confirm('Удалить гостя '+g.name+'?'))api('/api/admin/guests/'+g.id,{method:'DELETE'}).then(refresh).catch(fail)};dc.appendChild(db);
+  });
+ }catch(e){fail(e)}
+}
+$('event').onchange=refresh;
+$('mkev').onclick=()=>{if(!$('newev').value)return;api('/api/admin/events',{method:'POST',body:form({name:$('newev').value})}).then(()=>{$('newev').value='';loadEvents()}).catch(fail)};
+$('add').onclick=()=>api('/api/admin/guests',{method:'POST',body:form({event_id:$('event').value,lines:$('lines').value})}).then(()=>{$('lines').value='';refresh()}).catch(fail);
+$('purge').onclick=()=>{if(confirm('Удалить отпечатки лиц всех гостей этого мероприятия? Вход по лицу перестанет работать.'))api('/api/admin/events/'+$('event').value+'/purge',{method:'POST'}).then(j=>alert('Очищено: '+j.cleared)).catch(fail)};
+loadEvents();
+</script></body></html>

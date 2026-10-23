@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Вход в ресторан</title>
+<style>
+body{font-family:system-ui;max-width:420px;margin:0 auto;padding:16px;text-align:center}
+video{width:100%;border-radius:8px;background:#000;transform:scaleX(-1)}
+button{width:100%;padding:14px;font-size:18px;background:#2563eb;color:#fff;border:0;border-radius:8px;margin-top:8px}
+#res{margin-top:14px;padding:20px;border-radius:12px;display:none}
+.ok{background:#16a34a;color:#fff}.bad{background:#dc2626;color:#fff}.wait{background:#f59e0b;color:#000}
+#table{font-size:56px;font-weight:700;line-height:1.1}
+</style></head><body>
+<h2>Добро пожаловать!</h2>
+<p>Посмотрите в камеру, чтобы мы нашли ваш столик.</p>
+<video id="v" autoplay playsinline muted></video>
+<canvas id="c" hidden></canvas>
+<div id="res"></div>
+<button id="again" style="display:none">Повторить</button>
+<script>
+const $=id=>document.getElementById(id);
+const event_id=new URLSearchParams(location.search).get('event')||1;
+function show(cls,html){const r=$('res');r.className=cls;r.innerHTML=html;r.style.display='block'}
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+async function recognize(){
+ $('again').style.display='none';show('wait','Распознаём…');
+ const v=$('v'),c=$('c');c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0);
+ const blob=await new Promise(r=>c.toBlob(r,'image/jpeg',0.9));
+ const f=new FormData();f.append('event_id',event_id);f.append('selfie',blob,'f.jpg');
+ let j;
+ try{const r=await fetch('/api/checkin',{method:'POST',body:f});j=await r.json();if(!r.ok)j={ok:false,retry:true,reason:j.detail||'Ошибка'}}
+ catch(e){j={ok:false,retry:true,reason:'Нет связи с сервером'}}
+ if(j.ok){
+  const t=j.table?'Ваш столик<div id="table">'+esc(j.table)+'</div>':'Столик пока не назначен.<br>Подойдите к администратору.';
+  show('ok','Здравствуйте, '+esc(j.name)+'!<br><br>'+t);
+  const s=v.srcObject;if(s)s.getTracks().forEach(x=>x.stop());
+ }else{
+  show('bad',esc(j.reason||'Не удалось распознать'));
+  if(j.retry)$('again').style.display='block';
+ }
+}
+$('again').onclick=recognize;
+navigator.mediaDevices.getUserMedia({video:{facingMode:'user'}}).then(s=>{
+ $('v').srcObject=s;setTimeout(recognize,2000);
+}).catch(()=>show('bad','Нет доступа к камере. Разрешите камеру в браузере и обновите страницу.'));
+</script></body></html>
