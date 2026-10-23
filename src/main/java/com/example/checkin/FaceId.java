@@ -1,26 +1,30 @@
 package com.example.checkin;
 
+import jakarta.annotation.PreDestroy;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.util.Collection;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 
 /**
- * Face ID: регистрация лица и поиск человека по фото среди зарегистрированных.
- * Работает поверх {@link FaceEngine}, не зависит от Spring и базы данных.
+ * Face ID как Spring-сервис: регистрация лица и поиск человека по фото.
+ * Использует бин {@link FaceEngine}, если он есть в контексте, иначе создаёт свой
+ * по настройкам MODELS_DIR и FACE_MOCK.
  *
- * Пример:
+ * Пример в контроллере:
  * <pre>
- *   FaceId faceId = new FaceId(engine, 0.40f, 0.05f, 2);
- *   byte[] emb = faceId.enroll(selfieBytes);               // сохранить в БД
- *   faceId.put(eventId, guestId, emb);                     // загрузить в память
- *   FaceId.Match m = faceId.identify(eventId, photoBytes); // на входе
- *   if (m.status() == FaceId.Status.MATCH) ... m.personId()
+ *   byte[] emb = faceId.enroll(selfie.getBytes());          // сохранить в БД
+ *   faceId.put(eventId, guestId, emb);                      // загрузить в память
+ *   FaceId.Match m = faceId.identify(eventId, photo.getBytes());
+ *   if (m.ok()) ... m.personId()
  * </pre>
  */
+@Service
 public class FaceId {
 
     public enum Status { MATCH, NO_FACE, UNKNOWN, AMBIGUOUS, EMPTY }
@@ -31,6 +35,8 @@ public class FaceId {
     }
 
     private final FaceEngine engine;
+    /** true, если движок создан этим сервисом и его надо закрыть при остановке. */
+    private final boolean ownsEngine;
     private final float threshold;
     private final float margin;
     /** Ограничение одновременных запусков модели, чтобы не перегрузить CPU и память. */
@@ -38,16 +44,23 @@ public class FaceId {
     /** Группа (мероприятие) -> (id человека -> нормированный вектор). */
     private final Map<Object, Map<String, float[]>> groups = new ConcurrentHashMap<>();
 
-    /**
-     * @param threshold    минимальное сходство для совпадения (обычно 0.35–0.45)
-     * @param margin       минимальный отрыв лучшего совпадения от второго
-     * @param maxParallel  сколько распознаваний может идти одновременно
-     */
-    public FaceId(FaceEngine engine, float threshold, float margin, int maxParallel) {
-        this.engine = Objects.requireNonNull(engine);
+    public FaceId(ObjectProvider<FaceEngine> engines,
+                  @Value("${MODELS_DIR:models}") String modelsDir,
+                  @Value("${FACE_MOCK:0}") String mock,
+                  @Value("${FACE_THRESHOLD:0.40}") float threshold,
+                  @Value("${FACE_MARGIN:0.05}") float margin,
+                  @Value("${FACE_MAX_PARALLEL:2}") int maxParallel) throws Exception {
+        FaceEngine existing = engines.getIfAvailable();
+        this.ownsEngine = existing == null;
+        this.engine = existing != null ? existing : new FaceEngine(modelsDir, "1".equals(mock));
         this.threshold = threshold;
         this.margin = margin;
         this.slots = new Semaphore(Math.max(1, maxParallel));
+    }
+
+    @PreDestroy
+    void close() throws Exception {
+        if (ownsEngine) engine.close();
     }
 
     // ---------- регистрация ----------
@@ -95,19 +108,9 @@ public class FaceId {
         } catch (FaceEngine.FaceException e) {
             return new Match(Status.NO_FACE, null, 0, e.getMessage());
         }
-        return best(probe, people.entrySet());
-    }
-
-    /** Проверка «это тот же человек?» (1:1), например при повторном входе. */
-    public boolean verify(byte[] image, byte[] storedEmbedding) {
-        float[] probe = embed(image, false);
-        return FaceMath.dot(probe, FaceMath.l2normalize(toFloats(storedEmbedding))) >= threshold;
-    }
-
-    private Match best(float[] probe, Collection<Map.Entry<String, float[]>> people) {
         String bestId = null;
         float bestScore = -2, second = -2;
-        for (Map.Entry<String, float[]> p : people) {
+        for (Map.Entry<String, float[]> p : people.entrySet()) {
             float s = FaceMath.dot(p.getValue(), probe);
             if (s > bestScore) { second = bestScore; bestScore = s; bestId = p.getKey(); }
             else if (s > second) second = s;
@@ -117,6 +120,12 @@ public class FaceId {
         if (people.size() > 1 && bestScore - second < margin)
             return new Match(Status.AMBIGUOUS, null, bestScore, "Не удалось однозначно определить человека");
         return new Match(Status.MATCH, bestId, bestScore, null);
+    }
+
+    /** Проверка «это тот же человек?» (1:1). */
+    public boolean verify(byte[] image, byte[] storedEmbedding) {
+        float[] probe = embed(image, false);
+        return FaceMath.dot(probe, FaceMath.l2normalize(toFloats(storedEmbedding))) >= threshold;
     }
 
     private float[] embed(byte[] image, boolean requireSingle) {
